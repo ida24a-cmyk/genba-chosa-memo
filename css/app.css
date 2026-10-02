@@ -1,0 +1,133 @@
+/* 現場調査メモの見た目。縦向き・片手操作が前提。
+   ボタンは高さ48px以上、文字は16px以上(iPhoneの入力時の自動拡大を防ぐ)。 */
+
+:root {
+  --bg: #f4f5f7;
+  --card: #ffffff;
+  --text: #1f2933;
+  --sub: #5f6b7a;
+  --line: #cfd6de;
+  --primary: #1f5fbf;
+  --danger: #b3261e;
+  /* 事実=青系、推論=橙系。色と文字(【事実】【推論】)の両方で区別する */
+  --fact: #1f5fbf;
+  --fact-bg: #e6effb;
+  --infer: #b85c00;
+  --infer-bg: #fdeedd;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, "Hiragino Sans", "Yu Gothic", sans-serif;
+  font-size: 16px;
+  line-height: 1.5;
+}
+
+/* 上・左右・下の安全な余白(ノッチやホームバーに隠れないように)を足す */
+#app {
+  max-width: 640px;
+  margin: 0 auto;
+  padding:
+    calc(12px + env(safe-area-inset-top))
+    calc(12px + env(safe-area-inset-right))
+    calc(24px + env(safe-area-inset-bottom))
+    calc(12px + env(safe-area-inset-left));
+}
+
+h1 { font-size: 20px; margin: 8px 0 12px; word-break: break-word; }
+h2 { font-size: 17px; margin: 16px 0 8px; }
+
+.card {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 12px;
+  margin-bottom: 10px;
+}
+
+/* ボタン類 */
+button, .btn {
+  min-height: 48px;
+  padding: 0 16px;
+  font-size: 16px;
+  font-family: inherit;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--card);
+  color: var(--text);
+  cursor: pointer;
+}
+button.primary { background: var(--primary); border-color: var(--primary); color: #fff; font-weight: bold; }
+button.danger { color: var(--danger); border-color: var(--danger); }
+button.block { display: block; width: 100%; }
+button[aria-pressed="true"] { background: var(--primary); border-color: var(--primary); color: #fff; font-weight: bold; }
+
+.row { display: flex; gap: 8px; align-items: center; }
+.row > * { flex: 1; }
+.row > .grow { flex: 3; }
+
+/* 入力欄 */
+input[type="text"], input[type="datetime-local"], select, textarea {
+  width: 100%;
+  min-height: 48px;
+  padding: 8px 10px;
+  font-size: 16px;
+  font-family: inherit;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--text);
+}
+textarea { min-height: 140px; resize: vertical; }
+
+label, .label { display: block; font-weight: bold; margin: 12px 0 4px; }
+
+/* 種別の選択(ラジオボタン) */
+.kind-choices { display: flex; gap: 8px; }
+.kind-choices label {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 48px;
+  margin: 0;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #fff;
+}
+.kind-choices input { width: 20px; height: 20px; }
+
+/* 調査・メモの一覧 */
+.list-item { display: block; width: 100%; text-align: left; margin-bottom: 8px; padding: 10px 14px; line-height: 1.4; }
+.list-item .sub { display: block; color: var(--sub); font-size: 14px; }
+
+.memo { border-left: 6px solid var(--line); }
+.memo.fact { border-left-color: var(--fact); }
+.memo.infer { border-left-color: var(--infer); }
+.memo-head { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; font-size: 14px; color: var(--sub); }
+.badge { font-weight: bold; padding: 1px 8px; border-radius: 6px; font-size: 15px; }
+.badge.fact { color: var(--fact); background: var(--fact-bg); }
+.badge.infer { color: var(--infer); background: var(--infer-bg); }
+.memo-body { margin: 8px 0; white-space: pre-wrap; word-break: break-word; }
+.memo-meta { font-size: 13px; color: var(--sub); margin-bottom: 8px; }
+
+.filter { display: flex; gap: 6px; margin: 8px 0; }
+.filter button { flex: 1; padding: 0 4px; }
+
+.empty { color: var(--sub); text-align: center; padding: 16px 0; }
+.error { color: var(--danger); font-weight: bold; margin: 8px 0; min-height: 1.5em; }
+.status { color: var(--sub); font-size: 14px; text-align: center; margin-top: 20px; }
+.back { margin-bottom: 4px; }
+
+/* 写真欄。中の file 入力は見えなくして、ボタンから開く(style属性は使わない) */
+.file-input { position: absolute; width: 1px; height: 1px; opacity: 0; overflow: hidden; pointer-events: none; }
+.thumbs { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0; }
+.thumb-item { width: calc(50% - 4px); }
+.thumb { display: block; width: 100%; height: 96px; object-fit: contain; background: #e9edf1; border: 1px solid var(--line); border-radius: 8px; margin-bottom: 4px; }
+.thumb-item button { width: 100%; font-size: 14px; }
+button:disabled { opacity: 0.5; }
