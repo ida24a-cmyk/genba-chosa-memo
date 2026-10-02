@@ -1,0 +1,9 @@
+# 手元専用の開発ルール(公開リポジトリに含めない)
+CLAUDE.md
+CLAUDE.local.md
+.claude/
+
+# OS が自動で作るファイル
+Thumbs.db
+desktop.ini
+.DS_Store

@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src 'self'; img-src 'self' blob: data:; script-src 'self'; style-src 'self'; worker-src 'self'; manifest-src 'self'; object-src 'none'; base-uri 'none'">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="ZIPテスト">
+<title>ZIP保存テスト</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icon-180.png">
+<link rel="stylesheet" href="style.css">
+<script src="app.js" defer></script>
+</head>
+<body>
+<main>
+  <h1>ZIP保存テスト(事前検証)</h1>
+  <p class="note">架空のテキスト1つと画像1つを入れたZIPを作り、Googleドライブへ保存できるかを試します。</p>
+
+  <dl class="status">
+    <dt>起動のしかた</dt><dd id="mode">確認中…</dd>
+    <dt>テスト画像の準備</dt><dd id="ready">準備中…</dd>
+    <dt>canShare の結果</dt><dd id="canshare">まだ押していません</dd>
+    <dt>実行結果</dt><dd id="result">まだ押していません</dd>
+  </dl>
+
+  <button id="btn-share" type="button" disabled>ZIPを作って共有する</button>
+  <p class="note">共有できない端末では、自動でダウンロードに切り替わります。</p>
+
+  <button id="btn-download" type="button" class="sub" disabled>(確認用)ダウンロードで保存する</button>
+  <p class="note">共有シートでうまくいかなかったときに、ダウンロード→ファイルアプリ経由を試すためのボタンです。</p>
+</main>
+</body>
+</html>
