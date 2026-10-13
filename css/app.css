@@ -1,4 +1,4 @@
-/* 現場調査メモの見た目。縦向き・片手操作が前提。
+/* 写真メモの見た目。縦向き・片手操作が前提。
    ボタンは高さ48px以上、文字は16px以上(iPhoneの入力時の自動拡大を防ぐ)。 */
 
 :root {
@@ -102,7 +102,7 @@ label, .label { display: block; font-weight: bold; margin: 12px 0 4px; }
 }
 .kind-choices input { width: 20px; height: 20px; }
 
-/* 調査・メモの一覧 */
+/* ノート・メモの一覧 */
 .list-item { display: block; width: 100%; text-align: left; margin-bottom: 8px; padding: 10px 14px; line-height: 1.4; }
 .list-item .sub { display: block; color: var(--sub); font-size: 14px; }
 

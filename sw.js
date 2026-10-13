@@ -6,7 +6,7 @@
 //   2. 新しいファイルを足したときは、APP_FILES にも書き足す。
 // データ(メモ・写真)は IndexedDB にあるので、ここを更新しても消えない。
 
-const CACHE_NAME = 'genba-chosa-memo-v1';
+const CACHE_NAME = 'genba-chosa-memo-v2';
 
 const APP_FILES = [
   './',

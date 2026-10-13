@@ -1,5 +1,5 @@
-// 調査の書き出し(ZIP作成と受け渡し)。
-// ZIPの中身: <調査id>_<書き出し日時>.md と photos/ フォルダ。
+// ノートの書き出し(ZIP作成と受け渡し)。
+// ZIPの中身: <ノートid>_<書き出し日時>.md と photos/ フォルダ。
 // 通信は一切しない。端末内で作ったZIPを、共有シートまたはダウンロードで渡すだけ。
 
 import { listMemos, getPhotos } from './db.js';
@@ -13,14 +13,14 @@ export function exportBaseName(investigationId, exportedAt) {
   return `${investigationId}_${formatFileStamp(exportedAt)}`;
 }
 
-// 写真ファイル名: <調査id>_<観測日時 YYYYMMDD-HHMM>_<連番>.jpg(連番は0埋め済みの文字列)
+// 写真ファイル名: <ノートid>_<観測日時 YYYYMMDD-HHMM>_<連番>.jpg(連番は0埋め済みの文字列)
 export function photoFileName(investigationId, observedAt, seq, digits) {
   return `${investigationId}_${formatFileStamp(observedAt)}_${String(seq).padStart(digits, '0')}.jpg`;
 }
 
 // 写真の連番を振る。
 // memos は sortMemos で並べ終えたもの。「並び順の先頭のメモから順に、各メモ内は photoIds の順」に、
-// 調査全体の通し番号を 001 から振る。総数が1000枚以上なら全体を4桁にする。
+// ノート全体の通し番号を 001 から振る。総数が1000枚以上なら全体を4桁にする。
 // 戻り値: { names: Map(メモid → 写真ファイル名の配列, photoIds と同じ順), total }
 export function assignPhotoNames(investigationId, memos) {
   const total = memos.reduce((sum, m) => sum + (m.photoIds ? m.photoIds.length : 0), 0);
@@ -39,16 +39,18 @@ export function assignPhotoNames(investigationId, memos) {
 }
 
 // mdファイルの本文を作る(改行は LF、末尾は改行1つ)。
-// investigation: { id, name, createdAt }
+// investigation: { id, name, createdAt, kind('調査' | 'ふつう'。無ければ調査) }
 // memos: sortMemos で並べ終えたもの
 // photoNames: assignPhotoNames の names
 // exportedAt: 書き出した瞬間の現地時刻(保存用の形式の文字列)
-// メモが0件のときは、見出し部分(調査名〜書き出し)だけを出す。
+// メモが0件のときは、見出し部分(ノート名〜書き出し)だけを出す。
 export function buildMarkdown(investigation, memos, photoNames, exportedAt) {
+  // 種類を持たない第1版のノートは調査ノート。ふつうのノートだけ形式が変わる。
+  const plain = investigation.kind === 'ふつう';
   const header = [
     `# ${investigation.name}`,
     '',
-    `- 調査ID: ${investigation.id}`,
+    `- ${plain ? 'ID' : '調査ID'}: ${investigation.id}`,
     `- 作成: ${formatDisplay(investigation.createdAt)}`,
     `- 書き出し: ${formatDisplay(exportedAt)}`,
   ].join('\n');
@@ -60,7 +62,8 @@ export function buildMarkdown(investigation, memos, photoNames, exportedAt) {
     let meta = `記録: ${formatDisplay(memo.recordedAt)}`;
     if (memo.updatedAt) meta += ` / 更新: ${formatDisplay(memo.updatedAt)}`;
     paragraphs.push(meta);
-    return `## ${formatDisplay(memo.observedAt)} 【${memo.kind}】${memo.stage}\n\n${paragraphs.join('\n\n')}`;
+    const title = plain ? formatDisplay(memo.observedAt) : `${formatDisplay(memo.observedAt)} 【${memo.kind}】${memo.stage}`;
+    return `## ${title}\n\n${paragraphs.join('\n\n')}`;
   });
 
   return [header, ...blocks].join('\n\n---\n\n') + '\n';
@@ -68,8 +71,8 @@ export function buildMarkdown(investigation, memos, photoNames, exportedAt) {
 
 // ---- ZIPの作成 ----
 
-// 調査1件ぶんのZIPを作り、{ file, name } を返す。
-// 絞り込みに関係なく、その調査のすべてのメモを含める。
+// ノート1件ぶんのZIPを作り、{ file, name } を返す。
+// 絞り込みに関係なく、そのノートのすべてのメモを含める。
 export async function prepareExport(investigation, now = new Date()) {
   const exportedAt = formatLocalTimestamp(now);
   const base = exportBaseName(investigation.id, exportedAt);

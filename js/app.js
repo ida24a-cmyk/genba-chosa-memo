@@ -1,14 +1,16 @@
 // 起動処理と画面の切り替え。
-// 画面は3つ: 調査一覧 → 調査の中(メモ一覧) → メモの入力/編集。
+// 画面は3つ: ノート一覧 → ノートの中(メモ一覧) → メモの入力/編集。
+// (コード上の名前の「investigation」は、画面でいう「ノート」のこと)
 // 画面の切り替えは URL の「#」以降で行う(スマホの「戻る」操作が自然に使える)。
-//   #/                      調査一覧
-//   #/inv/inv-001           調査の中
+//   #/                      ノート一覧
+//   #/inv/inv-001           ノートの中
 //   #/inv/inv-001/memo/new  メモの新規入力
 //   #/inv/inv-001/memo/m-000001  メモの編集
 
 import {
   STAGES,
   KINDS,
+  NOTE_KINDS,
   listInvestigations,
   getInvestigation,
   createInvestigation,
@@ -114,13 +116,17 @@ function persistText() {
     : '端末保存:未永続化(こまめに書き出してください)';
 }
 
-// ---- 調査一覧 ----
+// ---- ノート一覧 ----
 
 async function renderList(token) {
   const investigations = await listInvestigations();
   if (token !== renderToken) return;
   const errorBox = h('div', { class: 'error', role: 'alert' });
-  const nameInput = h('input', { type: 'text', id: 'new-name', placeholder: '調査の名前', autocomplete: 'off' });
+  const nameInput = h('input', { type: 'text', id: 'new-name', placeholder: 'ノートの名前', autocomplete: 'off' });
+  // 種類は初期値なし。選ばないと作成できない(db.js でも確認する)
+  const noteKindChoices = NOTE_KINDS.map((k) =>
+    h('label', {}, h('input', { type: 'radio', name: 'note-kind', value: k }), k)
+  );
   const createButton = h('button', { type: 'submit', class: 'primary', text: '作成' });
 
   const form = h(
@@ -131,7 +137,8 @@ async function renderList(token) {
         e.preventDefault();
         await withBusy([createButton], async () => {
           try {
-            const inv = await createInvestigation(nameInput.value);
+            const checkedKind = form.querySelector('input[name="note-kind"]:checked');
+            const inv = await createInvestigation(nameInput.value, checkedKind ? checkedKind.value : '');
             goReplace(`#/inv/${inv.id}`);
             return true;
           } catch (err) {
@@ -140,8 +147,10 @@ async function renderList(token) {
         });
       },
     },
-    h('label', { for: 'new-name', text: '新しい調査を作る' }),
+    h('label', { for: 'new-name', text: '新しいノートを作る' }),
     h('div', { class: 'row' }, h('div', { class: 'grow' }, nameInput), createButton),
+    h('div', { class: 'label', text: '種類(必須)' }),
+    h('div', { class: 'kind-choices', role: 'radiogroup', 'aria-label': 'ノートの種類' }, noteKindChoices),
     errorBox
   );
 
@@ -151,15 +160,15 @@ async function renderList(token) {
           'button',
           { type: 'button', class: 'list-item', onclick: () => go(`#/inv/${inv.id}`) },
           inv.name,
-          h('span', { class: 'sub', text: `${inv.id} / 作成: ${formatDisplay(inv.createdAt)}` })
+          h('span', { class: 'sub', text: `${inv.id} / ${inv.kind} / 作成: ${formatDisplay(inv.createdAt)}` })
         )
       )
-    : [h('p', { class: 'empty', text: 'まだ調査がありません。上から作ってください。' })];
+    : [h('p', { class: 'empty', text: 'まだノートがありません。上から作ってください。' })];
 
-  show(h('h1', { text: '現場調査メモ' }), form, h('h2', { text: '調査一覧' }), ...items, h('p', { class: 'status', id: 'persist-status', text: persistText() }));
+  show(h('h1', { text: '写真メモ' }), form, h('h2', { text: 'ノート一覧' }), ...items, h('p', { class: 'status', id: 'persist-status', text: persistText() }));
 }
 
-// ---- 調査の中(メモ一覧) ----
+// ---- ノートの中(メモ一覧) ----
 
 let kindFilter = 'all'; // 'all' | '事実' | '推論'
 let filterInvestigationId = null;
@@ -173,10 +182,11 @@ async function renderInvestigation(token, invId) {
     filterInvestigationId = invId;
   }
 
+  const isResearch = inv.kind === '調査'; // ふつうのノートは段階・種別・絞り込みなし
   const loaded = await listMemos(invId);
   if (token !== renderToken) return;
   const allMemos = sortMemos(loaded); // 観測時刻 → 記録時刻 → メモid
-  const memos = kindFilter === 'all' ? allMemos : allMemos.filter((m) => m.kind === kindFilter);
+  const memos = !isResearch || kindFilter === 'all' ? allMemos : allMemos.filter((m) => m.kind === kindFilter);
 
   // 名前変更(ふだんは隠しておく)
   const renameError = h('div', { class: 'error', role: 'alert' });
@@ -199,7 +209,7 @@ async function renderInvestigation(token, invId) {
         });
       },
     },
-    h('label', { for: 'rename-input', text: '調査の名前' }),
+    h('label', { for: 'rename-input', text: 'ノートの名前' }),
     renameInput,
     renameError,
     h(
@@ -213,9 +223,9 @@ async function renderInvestigation(token, invId) {
   const deleteInvButton = h('button', {
     type: 'button',
     class: 'danger',
-    text: '調査を削除',
+    text: 'ノートを削除',
     onclick: async () => {
-      if (!confirm(`調査「${inv.name}」を削除します。\nこの調査のメモと写真もすべて消え、元に戻せません。\nよろしいですか?`)) return;
+      if (!confirm(`ノート「${inv.name}」を削除します。\nこのノートのメモと写真もすべて消え、元に戻せません。\nよろしいですか?`)) return;
       await withBusy([deleteInvButton], async () => {
         try {
           await deleteInvestigation(inv.id);
@@ -287,9 +297,9 @@ async function renderInvestigation(token, invId) {
     : [h('p', { class: 'empty', text: allMemos.length ? 'この種別のメモはありません。' : 'まだメモがありません。' })];
 
   show(
-    h('button', { type: 'button', class: 'back', text: '← 調査一覧', onclick: () => go('#/') }),
+    h('button', { type: 'button', class: 'back', text: '← ノート一覧', onclick: () => go('#/') }),
     h('h1', { text: inv.name }),
-    h('p', { class: 'memo-meta', text: `${inv.id} / 作成: ${formatDisplay(inv.createdAt)}` }),
+    h('p', { class: 'memo-meta', text: `${inv.id} / ${inv.kind} / 作成: ${formatDisplay(inv.createdAt)}` }),
     h(
       'div',
       { class: 'row' },
@@ -300,7 +310,7 @@ async function renderInvestigation(token, invId) {
     h('div', { id: 'export-area' }, exportButton, exportStatus),
     h('h2', { text: 'メモ' }),
     h('button', { type: 'button', class: 'primary block', text: '＋ メモを追加', onclick: () => go(`#/inv/${inv.id}/memo/new`) }),
-    h('div', { class: 'filter', role: 'group', 'aria-label': '種別で絞り込み' }, filterButtons),
+    isResearch ? h('div', { class: 'filter', role: 'group', 'aria-label': '種別で絞り込み' }, filterButtons) : null,
     ...memoNodes
   );
 }
@@ -308,17 +318,18 @@ async function renderInvestigation(token, invId) {
 // メモ1件ぶんの表示を作る関数を返す。
 function memoCard(inv) {
   return (memo) => {
+    const isResearch = inv.kind === '調査';
     const isFact = memo.kind === '事実';
     const meta = `記録: ${formatDisplay(memo.recordedAt)}` + (memo.updatedAt ? ` / 更新: ${formatDisplay(memo.updatedAt)}` : '');
     return h(
       'div',
-      { class: `card memo ${isFact ? 'fact' : 'infer'}` },
+      { class: isResearch ? `card memo ${isFact ? 'fact' : 'infer'}` : 'card memo' },
       h(
         'div',
         { class: 'memo-head' },
         h('span', { text: formatDisplay(memo.observedAt) }),
-        h('span', { class: `badge ${isFact ? 'fact' : 'infer'}`, text: `【${memo.kind}】` }),
-        h('span', { text: memo.stage })
+        isResearch ? h('span', { class: `badge ${isFact ? 'fact' : 'infer'}`, text: `【${memo.kind}】` }) : null,
+        isResearch ? h('span', { text: memo.stage }) : null
       ),
       memo.body ? h('div', { class: 'memo-body', text: memo.body }) : null,
       memo.photoIds && memo.photoIds.length ? h('div', { class: 'memo-meta', text: `写真: ${memo.photoIds.length}枚` }) : null,
@@ -340,6 +351,7 @@ async function renderMemoForm(token, invId, memoId) {
   if (!isNew && (!memo || memo.investigationId !== invId)) return goReplace(`#/inv/${invId}`);
 
   // 初期値: 段階は直前に使った段階(初回は空)。種別は必ず空。観測時刻は現在の現地時刻。
+  const isResearch = inv.kind === '調査'; // ふつうのノートは段階・種別の欄を出さない
   const initial = memo || { stage: inv.lastStage || '', kind: '', body: '', observedAt: formatObservedInput() };
 
   const errorBox = h('div', { class: 'error', role: 'alert' });
@@ -491,8 +503,8 @@ async function renderMemoForm(token, invId, memoId) {
             await saveMemo({
               id: isNew ? null : memo.id,
               investigationId: invId,
-              stage: stageSelect.value,
-              kind: checked ? checked.value : '',
+              stage: isResearch ? stageSelect.value : null,
+              kind: isResearch && checked ? checked.value : '',
               body: bodyInput.value,
               observedAt: observedInput.value,
               photos: photoItems.map((p) => (p.id ? { id: p.id } : { blob: p.blob })),
@@ -505,13 +517,13 @@ async function renderMemoForm(token, invId, memoId) {
         });
       },
     },
-    h('label', { for: 'memo-stage', text: '段階(必須)' }),
-    stageSelect,
-    h('div', { class: 'label', text: '種別(必須)' }),
-    h('div', { class: 'kind-choices', role: 'radiogroup', 'aria-label': '種別' }, kindChoices),
+    isResearch ? h('label', { for: 'memo-stage', text: '段階(必須)' }) : null,
+    isResearch ? stageSelect : null,
+    isResearch ? h('div', { class: 'label', text: '種別(必須)' }) : null,
+    isResearch ? h('div', { class: 'kind-choices', role: 'radiogroup', 'aria-label': '種別' }, kindChoices) : null,
     h('label', { for: 'memo-body', text: '本文' }),
     bodyInput,
-    h('label', { for: 'memo-observed', text: '観測時刻' }),
+    h('label', { for: 'memo-observed', text: isResearch ? '観測時刻' : '日時' }),
     observedInput,
     photoArea,
     errorBox,
@@ -551,9 +563,9 @@ async function route() {
   } catch (err) {
     if (token !== renderToken) return;
     show(
-      h('h1', { text: '現場調査メモ' }),
+      h('h1', { text: '写真メモ' }),
       h('p', { class: 'error', text: `画面を表示できませんでした: ${errorMessage(err)}` }),
-      h('button', { type: 'button', class: 'primary block', text: '調査一覧へ', onclick: () => { goReplace('#/'); route(); } })
+      h('button', { type: 'button', class: 'primary block', text: 'ノート一覧へ', onclick: () => { goReplace('#/'); route(); } })
     );
   }
 }

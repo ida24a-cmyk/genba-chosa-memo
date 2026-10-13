@@ -9,6 +9,33 @@ const DB_VERSION = 1;
 // 段階(8つ)と種別(2つ)。順番は画面の表示順。
 export const STAGES = ['情報収集', '整理', '原因推定', '再現検証', '対策検討', '効果確認', '展開', '再発防止'];
 export const KINDS = ['事実', '推論'];
+// ノートの種類(第2版)。作成時に選び、あとから変えられない。
+export const NOTE_KINDS = ['調査', 'ふつう'];
+
+// ノートの種類を補う(純粋な処理。テストあり)。
+// 第1版で作ったデータは種類を持たないので、読み出すときに「調査」として扱う。保存データ自体は書き換えない。
+export function withNoteKind(inv) {
+  if (!inv) return inv;
+  return inv.kind === 'ふつう' || inv.kind === '調査' ? inv : { ...inv, kind: '調査' };
+}
+
+// メモの入力を検証する(純粋な処理。テストあり)。
+// 調査ノートは段階・種別が必須。ふつうのノートは段階・種別を持たない(null にそろえる)。
+// 戻り値: { stage, kind, observedAt(分まで) }。正しくなければ Error を投げる。
+export function validateMemoInput(noteKind, input) {
+  let stage = null;
+  let kind = null;
+  if (noteKind !== 'ふつう') {
+    if (!STAGES.includes(input.stage)) throw new Error('段階を選んでください');
+    if (!KINDS.includes(input.kind)) throw new Error('種別(事実/推論)を選んでください');
+    stage = input.stage;
+    kind = input.kind;
+  }
+  if (normalizeObserved(input.observedAt) === null) {
+    throw new Error(noteKind === 'ふつう' ? '日時を入力してください' : '観測時刻を入力してください');
+  }
+  return { stage, kind, observedAt: input.observedAt.slice(0, 16) };
+}
 
 // ---- 番号の書式(純粋な処理。テストあり) ----
 // 3桁(または6桁)のゼロ埋め。桁があふれたらそのまま桁が増える。
@@ -124,7 +151,7 @@ async function nextNumber(metaStore, field) {
 export async function listInvestigations() {
   const db = await openDb();
   const all = await req(db.transaction('investigations').objectStore('investigations').getAll());
-  return sortInvestigations(all);
+  return sortInvestigations(all.map(withNoteKind));
 }
 
 // 調査の並び順: id の番号の昇順(= 作成順)。inv-1000 は inv-999 の後に来る。
@@ -135,7 +162,7 @@ export function sortInvestigations(list) {
 
 export async function getInvestigation(id) {
   const db = await openDb();
-  return (await req(db.transaction('investigations').objectStore('investigations').get(id))) || null;
+  return withNoteKind((await req(db.transaction('investigations').objectStore('investigations').get(id))) || null);
 }
 
 function cleanName(name) {
@@ -144,15 +171,17 @@ function cleanName(name) {
   return trimmed;
 }
 
-export async function createInvestigation(name) {
+export async function createInvestigation(name, kind) {
   const cleaned = cleanName(name);
+  if (!NOTE_KINDS.includes(kind)) throw new Error('種類(調査/ふつう)を選んでください');
   return inTx(['meta', 'investigations'], async (tx) => {
     const n = await nextNumber(tx.objectStore('meta'), 'investigation');
     const inv = {
       id: formatInvestigationId(n),
       name: cleaned,
+      kind, // 'ふつう' | '調査'。作成後は変えない
       createdAt: formatLocalTimestamp(),
-      lastStage: null, // その調査で直前に使った段階。初回は null
+      lastStage: null, // その調査ノートで直前に使った段階。初回は null
     };
     tx.objectStore('investigations').put(inv);
     return inv;
@@ -164,7 +193,7 @@ export async function renameInvestigation(id, name) {
   return inTx(['investigations'], async (tx) => {
     const store = tx.objectStore('investigations');
     const inv = await req(store.get(id));
-    if (!inv) throw new Error('調査が見つかりません');
+    if (!inv) throw new Error('ノートが見つかりません');
     inv.name = cleaned;
     store.put(inv);
     return inv;
@@ -206,18 +235,16 @@ export async function getMemo(id) {
 // 段階・種別・観測時刻が正しくなければエラーにする(保存しない)。
 // 保存のたびに、調査の lastStage をこのメモの段階に更新する。
 export async function saveMemo(input) {
-  if (!STAGES.includes(input.stage)) throw new Error('段階を選んでください');
-  if (!KINDS.includes(input.kind)) throw new Error('種別(事実/推論)を選んでください');
-  if (normalizeObserved(input.observedAt) === null) throw new Error('観測時刻を入力してください');
-  const observedAt = input.observedAt.slice(0, 16); // 分まで
   const body = String(input.body ?? '');
 
   return inTx(['meta', 'investigations', 'memos', 'photos'], async (tx) => {
     const memoStore = tx.objectStore('memos');
     const invStore = tx.objectStore('investigations');
 
-    const inv = await req(invStore.get(input.investigationId));
-    if (!inv) throw new Error('調査が見つかりません');
+    const inv = withNoteKind(await req(invStore.get(input.investigationId)));
+    if (!inv) throw new Error('ノートが見つかりません');
+    // 調査ノートだけ段階・種別が必須。ふつうのノートは null で保存する
+    const { stage, kind, observedAt } = validateMemoInput(inv.kind, input);
 
     const now = formatLocalTimestamp();
     let memo;
@@ -226,8 +253,8 @@ export async function saveMemo(input) {
       if (!memo) throw new Error('メモが見つかりません');
       // 別の調査のメモを書き換えないための確認
       if (memo.investigationId !== input.investigationId) throw new Error('メモが見つかりません');
-      memo.stage = input.stage;
-      memo.kind = input.kind;
+      memo.stage = stage;
+      memo.kind = kind;
       memo.body = body;
       memo.observedAt = observedAt;
       memo.updatedAt = now; // 記録時刻は変えない
@@ -236,8 +263,8 @@ export async function saveMemo(input) {
       memo = {
         id: formatMemoId(n),
         investigationId: input.investigationId,
-        stage: input.stage,
-        kind: input.kind,
+        stage,
+        kind,
         body,
         observedAt,
         recordedAt: now,
@@ -264,8 +291,12 @@ export async function saveMemo(input) {
       memo.photoIds = newIds;
     }
     memoStore.put(memo);
-    inv.lastStage = input.stage;
-    invStore.put(inv);
+    if (inv.kind === '調査') {
+      // 保存データに種類が無い第1版のノートも、ここでは変えずに lastStage だけ更新する
+      const raw = await req(invStore.get(inv.id));
+      raw.lastStage = stage;
+      invStore.put(raw);
+    }
     return memo;
   });
 }
