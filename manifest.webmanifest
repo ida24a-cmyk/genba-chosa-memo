@@ -1,6 +1,6 @@
 {
-  "name": "写真メモ",
-  "short_name": "写真メモ",
+  "name": "調査メモ",
+  "short_name": "調査メモ",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",

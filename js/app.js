@@ -16,6 +16,8 @@ import {
   createInvestigation,
   renameInvestigation,
   deleteInvestigation,
+  deleteInvestigations,
+  deleteMemos,
   listMemos,
   getMemo,
   saveMemo,
@@ -25,6 +27,11 @@ import {
 import { shrinkToJpeg } from './photo.js';
 import { prepareExport, deliverZip } from './export.js';
 import { sortMemos, formatDisplay, formatObservedInput } from './time.js';
+import { currentEdition } from './edition.js';
+import { toggleSelected, bulkDeleteButtonState, bulkConfirmMessage } from './select.js';
+
+// どちらの版か(調査メモ / 写真メモ)。版ごとの違いは edition.js に集めてある。
+const edition = currentEdition();
 
 const app = document.getElementById('app');
 
@@ -93,6 +100,60 @@ function errorMessage(err) {
   return err && err.message ? err.message : '保存できませんでした';
 }
 
+// ---- まとめて削除(「選んで削除」)の共通部品 ----
+// rows: [{ id, box(チェック欄), onSelectMode(selecting) }]
+// 戻り値: toggleButton(「選んで削除」)、bar(「N件を削除」「やめる」)、isSelecting()、toggle(id)
+function selectionController({ target, rows, deleteFn, afterDelete }) {
+  let selecting = false;
+  let selected = new Set();
+
+  const toggleButton = h('button', { type: 'button', class: 'block', text: '選んで削除', onclick: () => setSelecting(true) });
+  const deleteButton = h('button', { type: 'button', class: 'danger grow' });
+  const cancelButton = h('button', { type: 'button', text: 'やめる', onclick: () => setSelecting(false) });
+  const bar = h('div', { class: 'row', hidden: true }, deleteButton, cancelButton);
+
+  deleteButton.addEventListener('click', async () => {
+    const ids = [...selected];
+    if (!ids.length) return;
+    // OKのときだけ削除する
+    if (!confirm(bulkConfirmMessage(target, ids.length))) return;
+    await withBusy([deleteButton, cancelButton], async () => {
+      try {
+        await deleteFn(ids); // 1つの取引。失敗したら何も消えない
+        await afterDelete();
+        return true; // 画面が描き直されるまで押せないままにする
+      } catch (err) {
+        alert(errorMessage(err));
+      }
+    });
+  });
+
+  function refresh() {
+    const state = bulkDeleteButtonState(selected.size);
+    deleteButton.textContent = state.text;
+    deleteButton.disabled = state.disabled;
+    toggleButton.hidden = selecting;
+    bar.hidden = !selecting;
+    for (const row of rows) {
+      row.box.hidden = !selecting;
+      row.box.checked = selected.has(row.id);
+      row.onSelectMode(selecting);
+    }
+  }
+  function setSelecting(value) {
+    selecting = value;
+    selected = new Set();
+    refresh();
+  }
+  function toggle(id) {
+    selected = toggleSelected(selected, id);
+    refresh();
+  }
+  for (const row of rows) row.box.addEventListener('change', () => toggle(row.id));
+  refresh();
+  return { toggleButton, bar, toggle, isSelecting: () => selecting };
+}
+
 // ---- 永続化(端末にデータが残りやすくする依頼) ----
 
 let persistedState = false;
@@ -124,6 +185,7 @@ async function renderList(token) {
   const errorBox = h('div', { class: 'error', role: 'alert' });
   const nameInput = h('input', { type: 'text', id: 'new-name', placeholder: 'ノートの名前', autocomplete: 'off' });
   // 種類は初期値なし。選ばないと作成できない(db.js でも確認する)
+  // 写真メモでは種類を選ばせない(常に「ふつう」)
   const noteKindChoices = NOTE_KINDS.map((k) =>
     h('label', {}, h('input', { type: 'radio', name: 'note-kind', value: k }), k)
   );
@@ -138,7 +200,8 @@ async function renderList(token) {
         await withBusy([createButton], async () => {
           try {
             const checkedKind = form.querySelector('input[name="note-kind"]:checked');
-            const inv = await createInvestigation(nameInput.value, checkedKind ? checkedKind.value : '');
+            const kind = edition.kindChoice ? (checkedKind ? checkedKind.value : '') : 'ふつう';
+            const inv = await createInvestigation(nameInput.value, kind);
             goReplace(`#/inv/${inv.id}`);
             return true;
           } catch (err) {
@@ -149,23 +212,47 @@ async function renderList(token) {
     },
     h('label', { for: 'new-name', text: '新しいノートを作る' }),
     h('div', { class: 'row' }, h('div', { class: 'grow' }, nameInput), createButton),
-    h('div', { class: 'label', text: '種類(必須)' }),
-    h('div', { class: 'kind-choices', role: 'radiogroup', 'aria-label': 'ノートの種類' }, noteKindChoices),
+    edition.kindChoice ? h('div', { class: 'label', text: '種類(必須)' }) : null,
+    edition.kindChoice ? h('div', { class: 'kind-choices', role: 'radiogroup', 'aria-label': 'ノートの種類' }, noteKindChoices) : null,
     errorBox
   );
 
+  // 一覧の各行: チェック欄(「選んで削除」のときだけ表示)+ ノートのボタン
+  const selectRows = [];
+  let controller = null;
   const items = investigations.length
-    ? investigations.map((inv) =>
-        h(
+    ? investigations.map((inv) => {
+        const box = h('input', { type: 'checkbox', class: 'select-box', hidden: true, 'aria-label': `${inv.name}を選ぶ` });
+        const item = h(
           'button',
-          { type: 'button', class: 'list-item', onclick: () => go(`#/inv/${inv.id}`) },
+          {
+            type: 'button',
+            class: 'list-item',
+            onclick: () => (controller.isSelecting() ? controller.toggle(inv.id) : go(`#/inv/${inv.id}`)),
+          },
           inv.name,
           h('span', { class: 'sub', text: `${inv.id} / ${inv.kind} / 作成: ${formatDisplay(inv.createdAt)}` })
-        )
-      )
+        );
+        selectRows.push({ id: inv.id, box, onSelectMode: () => {} });
+        return h('div', { class: 'select-row' }, box, item);
+      })
     : [h('p', { class: 'empty', text: 'まだノートがありません。上から作ってください。' })];
+  controller = selectionController({
+    target: 'note',
+    rows: selectRows,
+    deleteFn: deleteInvestigations,
+    afterDelete: () => route(),
+  });
 
-  show(h('h1', { text: '写真メモ' }), form, h('h2', { text: 'ノート一覧' }), ...items, h('p', { class: 'status', id: 'persist-status', text: persistText() }));
+  show(
+    h('h1', { text: edition.label }),
+    form,
+    h('h2', { text: 'ノート一覧' }),
+    investigations.length ? controller.toggleButton : null,
+    investigations.length ? controller.bar : null,
+    ...items,
+    h('p', { class: 'status', id: 'persist-status', text: persistText() })
+  );
 }
 
 // ---- ノートの中(メモ一覧) ----
@@ -292,9 +379,35 @@ async function renderInvestigation(token, invId) {
     })
   );
 
+  let controller = null;
+  const selectRows = [];
+  const makeCard = memoCard(inv);
   const memoNodes = memos.length
-    ? memos.map(memoCard(inv))
+    ? memos.map((memo) => {
+        const card = makeCard(memo);
+        selectRows.push({
+          id: memo.id,
+          box: card.box,
+          onSelectMode: (on) => {
+            card.editButton.hidden = on;
+            card.el.classList.toggle('selectable', on);
+          },
+        });
+        // 選んで削除のときは、メモの行のどこを押しても切り替える(チェック欄自体の押下は change で処理される)
+        card.el.addEventListener('click', (e) => {
+          if (e.target !== card.box && controller.isSelecting()) controller.toggle(memo.id);
+        });
+        return card.el;
+      })
     : [h('p', { class: 'empty', text: allMemos.length ? 'この種別のメモはありません。' : 'まだメモがありません。' })];
+
+  // 絞り込み中は、画面に出ているメモ(selectRows)だけが選べる
+  controller = selectionController({
+    target: 'memo',
+    rows: selectRows,
+    deleteFn: deleteMemos,
+    afterDelete: () => route(),
+  });
 
   show(
     h('button', { type: 'button', class: 'back', text: '← ノート一覧', onclick: () => go('#/') }),
@@ -311,6 +424,8 @@ async function renderInvestigation(token, invId) {
     h('h2', { text: 'メモ' }),
     h('button', { type: 'button', class: 'primary block', text: '＋ メモを追加', onclick: () => go(`#/inv/${inv.id}/memo/new`) }),
     isResearch ? h('div', { class: 'filter', role: 'group', 'aria-label': '種別で絞り込み' }, filterButtons) : null,
+    memos.length ? controller.toggleButton : null,
+    memos.length ? controller.bar : null,
     ...memoNodes
   );
 }
@@ -321,12 +436,15 @@ function memoCard(inv) {
     const isResearch = inv.kind === '調査';
     const isFact = memo.kind === '事実';
     const meta = `記録: ${formatDisplay(memo.recordedAt)}` + (memo.updatedAt ? ` / 更新: ${formatDisplay(memo.updatedAt)}` : '');
-    return h(
+    const box = h('input', { type: 'checkbox', class: 'select-box', hidden: true, 'aria-label': 'このメモを選ぶ' });
+    const editButton = h('button', { type: 'button', class: 'block', text: '編集', onclick: () => go(`#/inv/${inv.id}/memo/${memo.id}`) });
+    const el = h(
       'div',
       { class: isResearch ? `card memo ${isFact ? 'fact' : 'infer'}` : 'card memo' },
       h(
         'div',
         { class: 'memo-head' },
+        box,
         h('span', { text: formatDisplay(memo.observedAt) }),
         isResearch ? h('span', { class: `badge ${isFact ? 'fact' : 'infer'}`, text: `【${memo.kind}】` }) : null,
         isResearch ? h('span', { text: memo.stage }) : null
@@ -334,8 +452,9 @@ function memoCard(inv) {
       memo.body ? h('div', { class: 'memo-body', text: memo.body }) : null,
       memo.photoIds && memo.photoIds.length ? h('div', { class: 'memo-meta', text: `写真: ${memo.photoIds.length}枚` }) : null,
       h('div', { class: 'memo-meta', text: meta }),
-      h('button', { type: 'button', class: 'block', text: '編集', onclick: () => go(`#/inv/${inv.id}/memo/${memo.id}`) })
+      editButton
     );
+    return { el, box, editButton };
   };
 }
 
@@ -563,7 +682,7 @@ async function route() {
   } catch (err) {
     if (token !== renderToken) return;
     show(
-      h('h1', { text: '写真メモ' }),
+      h('h1', { text: edition.label }),
       h('p', { class: 'error', text: `画面を表示できませんでした: ${errorMessage(err)}` }),
       h('button', { type: 'button', class: 'primary block', text: 'ノート一覧へ', onclick: () => { goReplace('#/'); route(); } })
     );

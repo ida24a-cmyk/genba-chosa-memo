@@ -2,7 +2,10 @@
 // データはこの端末の中だけに保存し、ネットワークには送らない。
 
 import { formatLocalTimestamp, normalizeObserved } from './time.js';
+import { currentEdition } from './edition.js';
+import { normalizeIds } from './select.js';
 
+// 調査メモの DB名(これまでのデータの場所。絶対に変えない)。版ごとの DB名は edition.js にある。
 export const DB_NAME = 'genba-chosa-memo';
 const DB_VERSION = 1;
 
@@ -39,8 +42,9 @@ export function validateMemoInput(noteKind, input) {
 
 // ---- 番号の書式(純粋な処理。テストあり) ----
 // 3桁(または6桁)のゼロ埋め。桁があふれたらそのまま桁が増える。
-export function formatInvestigationId(n) {
-  return `inv-${String(n).padStart(3, '0')}`;
+// prefix は版ごとの頭文字(調査メモ='inv'、写真メモ='note')。
+export function formatInvestigationId(n, prefix = 'inv') {
+  return `${prefix}-${String(n).padStart(3, '0')}`;
 }
 export function formatMemoId(n) {
   return `m-${String(n).padStart(6, '0')}`;
@@ -101,7 +105,7 @@ let dbPromise = null;
 export function openDb() {
   if (dbPromise) return dbPromise;
   dbPromise = new Promise((resolve, reject) => {
-    const open = indexedDB.open(DB_NAME, DB_VERSION);
+    const open = indexedDB.open(currentEdition().dbName, DB_VERSION);
     open.onupgradeneeded = () => {
       const db = open.result;
       // meta: 採番カウンター(削除しても番号を戻さないために持つ)
@@ -173,11 +177,13 @@ function cleanName(name) {
 
 export async function createInvestigation(name, kind) {
   const cleaned = cleanName(name);
+  // 種類を選ばせない版(写真メモ)は、常に「ふつう」にする
+  if (!currentEdition().kindChoice) kind = 'ふつう';
   if (!NOTE_KINDS.includes(kind)) throw new Error('種類(調査/ふつう)を選んでください');
   return inTx(['meta', 'investigations'], async (tx) => {
     const n = await nextNumber(tx.objectStore('meta'), 'investigation');
     const inv = {
-      id: formatInvestigationId(n),
+      id: formatInvestigationId(n, currentEdition().idPrefix),
       name: cleaned,
       kind, // 'ふつう' | '調査'。作成後は変えない
       createdAt: formatLocalTimestamp(),
@@ -202,16 +208,25 @@ export async function renameInvestigation(id, name) {
 
 // 調査を削除する。その調査のメモと写真も一緒に削除する。
 export async function deleteInvestigation(id) {
+  return deleteInvestigations([id]);
+}
+
+// 複数の調査を、1つの取引でまとめて削除する(途中で失敗したら何も消えない)。
+export async function deleteInvestigations(ids) {
+  const list = normalizeIds(ids);
+  if (!list.length) return;
   return inTx(['investigations', 'memos', 'photos'], async (tx) => {
     const memoStore = tx.objectStore('memos');
     const photoStore = tx.objectStore('photos');
-    const memos = await req(memoStore.index('investigationId').getAll(id));
-    for (const memo of memos) {
-      const photoKeys = await req(photoStore.index('memoId').getAllKeys(memo.id));
-      for (const key of photoKeys) photoStore.delete(key);
-      memoStore.delete(memo.id);
+    for (const id of list) {
+      const memos = await req(memoStore.index('investigationId').getAll(id));
+      for (const memo of memos) {
+        const photoKeys = await req(photoStore.index('memoId').getAllKeys(memo.id));
+        for (const key of photoKeys) photoStore.delete(key);
+        memoStore.delete(memo.id);
+      }
+      tx.objectStore('investigations').delete(id);
     }
-    tx.objectStore('investigations').delete(id);
   });
 }
 
@@ -315,10 +330,19 @@ export async function getPhotos(ids) {
 
 // メモを削除する。そのメモの写真も一緒に削除する。
 export async function deleteMemo(id) {
+  return deleteMemos([id]);
+}
+
+// 複数のメモを、1つの取引でまとめて削除する(写真も一緒。途中で失敗したら何も消えない)。
+export async function deleteMemos(ids) {
+  const list = normalizeIds(ids);
+  if (!list.length) return;
   return inTx(['memos', 'photos'], async (tx) => {
     const photoStore = tx.objectStore('photos');
-    const photoKeys = await req(photoStore.index('memoId').getAllKeys(id));
-    for (const key of photoKeys) photoStore.delete(key);
-    tx.objectStore('memos').delete(id);
+    for (const id of list) {
+      const photoKeys = await req(photoStore.index('memoId').getAllKeys(id));
+      for (const key of photoKeys) photoStore.delete(key);
+      tx.objectStore('memos').delete(id);
+    }
   });
 }
