@@ -11,7 +11,7 @@
 // 保存名の頭(CACHE_PREFIX)を版ごとに分けてあり、古い保存分の削除は自分の版の分だけを対象にする。
 
 const CACHE_PREFIX = 'genba-chosa-memo-';
-const CACHE_NAME = CACHE_PREFIX + 'v3';
+const CACHE_NAME = CACHE_PREFIX + 'v4';
 
 // 写真メモの住所(memo/ 以下)。ここへの読み込みには一切関わらない(写真メモ側の Service Worker に任せる)。
 const MEMO_DIR = new URL('./memo/', self.registration.scope).pathname; // 例: /genba-chosa-memo/memo/
@@ -32,6 +32,7 @@ const APP_FILES = [
   './js/export.js',
   './js/edition.js',
   './js/select.js',
+  './js/draft.js',
   './icons/icon-180.png',
   './icons/icon-192.png',
   './icons/icon-512.png',

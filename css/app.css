@@ -129,7 +129,7 @@ label, .label { display: block; font-weight: bold; margin: 12px 0 4px; }
 .thumbs { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0; }
 .thumb-item { width: calc(50% - 4px); }
 .thumb { display: block; width: 100%; height: 96px; object-fit: contain; background: #e9edf1; border: 1px solid var(--line); border-radius: 8px; margin-bottom: 4px; }
-.thumb-item button { width: 100%; font-size: 14px; }
+.thumb-item button { width: 100%; font-size: 16px; }
 button:disabled { opacity: 0.5; }
 
 /* まとめて削除(選んで削除):チェック欄。hidden 属性のときは確実に隠す */
@@ -139,3 +139,64 @@ button:disabled { opacity: 0.5; }
 .select-box { flex: none; width: 36px; height: 36px; margin: 12px 0 0; }
 .memo-head .select-box { width: 36px; height: 36px; margin: 0; }
 .memo.selectable { cursor: pointer; }
+
+/* 第4版:メモの入力/編集画面の一番上の帯(「← 戻る」と「保存」)。下へスクロールしても画面の上に残る。
+   #app の上の余白(12px + 安全な余白)に食い込ませて、帯が一番上にぴったり付くようにする。
+   iPhoneのノッチの下に帯の文字が隠れないよう、帯の中に安全な余白を足す。 */
+.topbar {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin:
+    calc(-12px - env(safe-area-inset-top))
+    calc(-12px - env(safe-area-inset-right))
+    8px
+    calc(-12px - env(safe-area-inset-left));
+  padding:
+    calc(8px + env(safe-area-inset-top))
+    calc(12px + env(safe-area-inset-right))
+    8px
+    calc(12px + env(safe-area-inset-left));
+  background: var(--bg);
+  border-bottom: 1px solid var(--line);
+}
+.topbar button { margin: 0; }
+.topbar .back {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
+}
+.topbar .primary { flex: none; min-width: 96px; }
+
+/* 第4版:保存していない書きかけのメモの案内帯(ノート一覧・ノートの中) */
+.draft-banner {
+  background: var(--infer-bg);
+  border: 1px solid var(--infer);
+  border-radius: 10px;
+  padding: 12px;
+  margin: 8px 0 12px;
+}
+.draft-title { font-weight: bold; color: #8f4500; margin-bottom: 8px; }
+.draft-item + .draft-item { margin-top: 12px; }
+.draft-label { margin-bottom: 6px; word-break: break-word; }
+
+/* 第4版:下書きから内容を戻したときの1行 */
+.restored {
+  background: var(--fact-bg);
+  border: 1px solid var(--fact);
+  color: var(--fact);
+  border-radius: 10px;
+  padding: 8px 12px;
+  margin-bottom: 8px;
+  font-weight: bold;
+}
+
+/* 第4版:下書きを書けなかったときの控えめな1行(空のときは場所をとらない) */
+.draft-warning { color: #8f4500; font-size: 14px; margin: 0 0 8px; }
+.draft-warning:empty { display: none; }

@@ -23,7 +23,24 @@ import {
   saveMemo,
   deleteMemo,
   getPhotos,
+  listDrafts,
+  getDraft,
+  putDraftText,
+  putDraftBlob,
+  putDraftPhotos,
+  deleteDraftBlobs,
+  deleteDraft,
 } from './db.js';
+import {
+  draftKey,
+  draftPhotosKey,
+  draftBlobKey,
+  nextBlobNumber,
+  unusedBlobKeys,
+  hasChanges,
+  draftLabel,
+  restorablePhotos,
+} from './draft.js';
 import { shrinkToJpeg } from './photo.js';
 import { prepareExport, deliverZip } from './export.js';
 import { sortMemos, formatDisplay, formatObservedInput } from './time.js';
@@ -53,6 +70,9 @@ function h(tag, props = {}, ...children) {
   }
   return el;
 }
+
+// いま開いているメモの入力/編集画面の「下書きを今すぐ書く」処理(なければ null)。route() が呼ぶ。
+let activeDraftFlush = null;
 
 // 画面を離れるときに実行する後片付け(写真の表示用データの解放など)。
 let pageCleanups = [];
@@ -177,10 +197,59 @@ function persistText() {
     : '端末保存:未永続化(こまめに書き出してください)';
 }
 
+// ---- 書きかけのメモ(下書き)の案内帯 ----
+// drafts: listDrafts() の結果。1件もなければ null(何も出さない)。
+// 「続きを書く」で編集画面へ移り、「捨てる」は確認のあとで下書きを消して画面を描き直す。
+function draftBanner(drafts) {
+  if (!drafts.length) return null;
+  const items = drafts.map((d) => {
+    const discardButton = h('button', {
+      type: 'button',
+      class: 'danger',
+      text: '捨てる',
+      onclick: async () => {
+        if (!confirm('この書きかけのメモを捨てます。\n書きかけの内容は消え、元に戻せません。\nよろしいですか?')) return;
+        await withBusy([discardButton], async () => {
+          try {
+            await deleteDraft(d.invId, d.memoId);
+            await route();
+            return true; // 画面が描き直されるまで押せないままにする
+          } catch (err) {
+            alert(errorMessage(err));
+          }
+        });
+      },
+    });
+    return h(
+      'div',
+      { class: 'draft-item' },
+      h('div', { class: 'draft-label', text: draftLabel(d) }),
+      h(
+        'div',
+        { class: 'row' },
+        h('button', { type: 'button', class: 'primary', text: '続きを書く', onclick: () => go(`#/inv/${d.invId}/memo/${d.memoId}`) }),
+        discardButton
+      )
+    );
+  });
+  return h('div', { class: 'draft-banner', role: 'status' }, h('div', { class: 'draft-title', text: '保存していない書きかけのメモがあります' }), items);
+}
+
+// 下書きの一覧を読む。読めなくても画面は出す(案内帯が出ないだけ)。
+async function loadDrafts(invId) {
+  try {
+    return await listDrafts(invId);
+  } catch (err) {
+    return [];
+  }
+}
+
 // ---- ノート一覧 ----
 
 async function renderList(token) {
   const investigations = await listInvestigations();
+  if (token !== renderToken) return;
+  const drafts = await loadDrafts(null);
   if (token !== renderToken) return;
   const errorBox = h('div', { class: 'error', role: 'alert' });
   const nameInput = h('input', { type: 'text', id: 'new-name', placeholder: 'ノートの名前', autocomplete: 'off' });
@@ -246,6 +315,7 @@ async function renderList(token) {
 
   show(
     h('h1', { text: edition.label }),
+    draftBanner(drafts),
     form,
     h('h2', { text: 'ノート一覧' }),
     investigations.length ? controller.toggleButton : null,
@@ -271,6 +341,8 @@ async function renderInvestigation(token, invId) {
 
   const isResearch = inv.kind === '調査'; // ふつうのノートは段階・種別・絞り込みなし
   const loaded = await listMemos(invId);
+  if (token !== renderToken) return;
+  const drafts = await loadDrafts(invId);
   if (token !== renderToken) return;
   const allMemos = sortMemos(loaded); // 観測時刻 → 記録時刻 → メモid
   const memos = !isResearch || kindFilter === 'all' ? allMemos : allMemos.filter((m) => m.kind === kindFilter);
@@ -413,6 +485,7 @@ async function renderInvestigation(token, invId) {
     h('button', { type: 'button', class: 'back', text: '← ノート一覧', onclick: () => go('#/') }),
     h('h1', { text: inv.name }),
     h('p', { class: 'memo-meta', text: `${inv.id} / ${inv.kind} / 作成: ${formatDisplay(inv.createdAt)}` }),
+    draftBanner(drafts),
     h(
       'div',
       { class: 'row' },
@@ -473,29 +546,56 @@ async function renderMemoForm(token, invId, memoId) {
   const isResearch = inv.kind === '調査'; // ふつうのノートは段階・種別の欄を出さない
   const initial = memo || { stage: inv.lastStage || '', kind: '', body: '', observedAt: formatObservedInput() };
 
+  // 保存していなかった下書きがあれば、それで欄と写真を埋める(なければ null)。
+  // 下書きの読み出しに失敗しても、ふつうに開けるようにする。
+  let draft = null;
+  let draftReadFailed = false;
+  try {
+    draft = await getDraft(invId, memoId);
+  } catch (err) {
+    draft = null;
+    draftReadFailed = true; // 読めなかっただけで、下書きは「あるかもしれない」
+  }
+  if (token !== renderToken) return;
+  const start = draft
+    ? { stage: draft.stage, kind: draft.kind, body: draft.body, observedAt: draft.observedAt || initial.observedAt }
+    : initial;
+
   const errorBox = h('div', { class: 'error', role: 'alert' });
 
   // 写真の並び。{ id, blob, url } = 保存済みの写真、{ blob, url } = まだ保存していない写真。
-  // 保存ボタンを押すまでは画面の中だけで持ち、押さずに画面を離れたら捨てる。
-  const photoItems = (isNew ? [] : await getPhotos(memo.photoIds || [])).map((p) => ({ id: p.id, blob: p.blob, url: null }));
+  // 保存ボタンを押すまでは画面の中で持つ。ただし下書きとして端末の中にも自動でしまっておく。
+  const savedPhotos = isNew ? [] : await getPhotos(memo.photoIds || []);
   if (token !== renderToken) return;
+  let photoItems;
+  if (draft && draft.photos) {
+    // 下書きの写真の並びで復元する。今のメモに無い写真({id})は飛ばす
+    const byId = new Map(savedPhotos.map((p) => [p.id, p.blob]));
+    photoItems = restorablePhotos(draft.photos, isNew ? [] : memo.photoIds || [])
+      .map((p) => (p.id ? { id: p.id, blob: byId.get(p.id), url: null } : { blob: p.blob, blobKey: p.blobKey, url: null }))
+      .filter((p) => p.blob);
+  } else {
+    photoItems = savedPhotos.map((p) => ({ id: p.id, blob: p.blob, url: null }));
+  }
 
   const stageSelect = h(
     'select',
     { id: 'memo-stage' },
     h('option', { value: '', text: '選んでください' }),
-    STAGES.map((s) => h('option', { value: s, text: s, selected: s === initial.stage }))
+    STAGES.map((s) => h('option', { value: s, text: s, selected: s === start.stage }))
   );
 
   const kindChoices = KINDS.map((k) =>
-    h('label', {}, h('input', { type: 'radio', name: 'kind', value: k, checked: k === initial.kind }), `【${k}】`)
+    h('label', {}, h('input', { type: 'radio', name: 'kind', value: k, checked: k === start.kind }), `【${k}】`)
   );
 
   const bodyInput = h('textarea', { id: 'memo-body' });
-  bodyInput.value = initial.body; // 改行をそのまま入れるため value で設定する
-  const observedInput = h('input', { type: 'datetime-local', id: 'memo-observed', value: initial.observedAt.slice(0, 16) });
+  bodyInput.value = start.body; // 改行をそのまま入れるため value で設定する
+  const observedInput = h('input', { type: 'datetime-local', id: 'memo-observed', value: start.observedAt.slice(0, 16) });
 
+  // 下の保存ボタンはフォームの中。上の帯の保存ボタンは、form 属性でこのフォームに結ぶ。
   const saveButton = h('button', { type: 'submit', class: 'primary block', text: '保存' });
+  const topSaveButton = h('button', { type: 'submit', class: 'primary', form: 'memo-form', text: '保存' });
 
   // ---- 写真欄 ----
   const photoStatus = h('div', { class: 'memo-meta', role: 'status' });
@@ -519,6 +619,133 @@ async function renderMemoForm(token, invId, memoId) {
   let alive = true; // 画面を離れたら false(処理中の写真は捨てる)
   let processing = false;
 
+  // ---- 下書きの自動保存(第4版) ----
+  // 開いたときの内容(DBの値)。いまの内容と比べて、変わっていれば「保存していない変更あり」。
+  const baseline = {
+    stage: isResearch ? initial.stage || '' : '',
+    kind: isResearch ? initial.kind || '' : '',
+    body: initial.body,
+    observedAt: initial.observedAt,
+    photos: isNew ? [] : (memo.photoIds || []).map((id) => ({ id })),
+  };
+  const forcedDirty = !!draft; // 下書きから戻した内容は、最初から「変更あり」として扱う
+
+  function currentState() {
+    const checked = form.querySelector('input[name="kind"]:checked');
+    return {
+      stage: isResearch ? stageSelect.value : '',
+      kind: isResearch && checked ? checked.value : '',
+      body: bodyInput.value,
+      observedAt: observedInput.value,
+      photos: photoItems.map((p) => (p.id ? { id: p.id } : { blob: p.blob })),
+    };
+  }
+  function isDirty() {
+    return forcedDirty || hasChanges(baseline, currentState());
+  }
+
+  // 下書きの書き込みの状態
+  let draftExists = !!draft || draftReadFailed; // 端末の中に、このメモの下書きがありそうか(読めなかったときも「ありそう」)
+  let photosDirty = !!(draft && draft.photos); // 写真の並びの下書きに、まだ書いていない付け外しがあるか
+  let draftStopped = false; // true の間は下書きを書かない(保存・削除・破棄の最中と、その後)
+  let draftTimer = null;
+  let draftTimerPending = false;
+  let draftQueue = Promise.resolve(); // 下書きの書き込みは1本の順番待ち(追い越しを防ぐ)
+  let flushQueued = false;
+  // 新しい写真の中身は、1枚ずつ別のキーに一度だけ書く。書き込み済みのキーをここで覚える。
+  const writtenBlobKeys = new Set(photoItems.filter((p) => p.blobKey).map((p) => p.blobKey));
+  let blobCounter = nextBlobNumber(writtenBlobKeys);
+  const draftWarning = h('div', { class: 'memo-meta draft-warning', role: 'status' });
+
+  // 順番待ちの先頭に来たときに、そのときの最新の内容を書く。書いたら true、書かなかったら false。
+  async function writeDraft() {
+    if (draftStopped) return false;
+    if (!isDirty()) {
+      // 開いたときと同じ状態に戻った: 下書きはいらない
+      photosDirty = false;
+      if (draftExists) {
+        await deleteDraft(invId, memoId);
+        draftExists = false;
+        writtenBlobKeys.clear();
+      }
+      return true;
+    }
+    // 文字と写真の並びは同じ瞬間の内容を取り、写真の印もすぐ戻す(書いている間の付け外しは次の回で書く)
+    const state = currentState();
+    const items = photoItems.slice();
+    const writePhotos = photosDirty;
+    photosDirty = false;
+    try {
+      await putDraftText({ invId, memoId, stage: state.stage, kind: state.kind, body: state.body, observedAt: state.observedAt });
+      draftExists = true;
+      if (writePhotos) {
+        // 順番: 写真の中身(まだ書いていないものだけ)→ 並び → 使わなくなった中身を消す
+        for (const item of items) {
+          if (!item.id && !writtenBlobKeys.has(item.blobKey)) {
+            await putDraftBlob(item.blobKey, item.blob);
+            writtenBlobKeys.add(item.blobKey);
+          }
+        }
+        const list = items.map((p) => (p.id ? { id: p.id } : { blobKey: p.blobKey }));
+        await putDraftPhotos(invId, memoId, list);
+        const unused = unusedBlobKeys(writtenBlobKeys, list);
+        if (unused.length) {
+          await deleteDraftBlobs(unused);
+          unused.forEach((k) => writtenBlobKeys.delete(k));
+        }
+      }
+    } catch (err) {
+      if (writePhotos) photosDirty = true; // 次の機会にもう一度書く
+      throw err;
+    }
+    return true;
+  }
+  // 今すぐ書く。順番待ちに入れて、待っている間に重なった分は1回にまとめる。
+  function flushDraft() {
+    clearTimeout(draftTimer);
+    draftTimerPending = false;
+    if (flushQueued) return draftQueue;
+    flushQueued = true;
+    draftQueue = draftQueue.then(async () => {
+      flushQueued = false;
+      try {
+        if (await writeDraft()) draftWarning.textContent = '';
+      } catch (err) {
+        // 入力そのものは続けられる。書けなかったことだけ、控えめに知らせる
+        draftWarning.textContent = '下書きを保存できませんでした(保存ボタンで保存してください)';
+      }
+    });
+    return draftQueue;
+  }
+  // 入力のたびに呼ぶ。約0.5秒ためてまとめて書く。
+  function scheduleDraft() {
+    clearTimeout(draftTimer);
+    draftTimerPending = true;
+    draftTimer = setTimeout(flushDraft, 500);
+  }
+  // 保存・削除・破棄の前に呼ぶ: 以降は下書きを書かない状態にして、書きかけの書き込みが終わるのを待つ。
+  // flushFirst が true なら、0.5秒待ちの分があるとき、止める前に一度書き切る(保存に失敗しても直前の入力が残るように)。
+  async function stopDraft(flushFirst = true) {
+    const pending = draftTimerPending;
+    clearTimeout(draftTimer);
+    draftTimerPending = false;
+    if (!flushFirst) draftStopped = true;
+    else if (pending) flushDraft();
+    await draftQueue;
+    draftStopped = true;
+    await draftQueue;
+  }
+  // 保存や削除が失敗したときに呼ぶ: 下書きの書き込みを再開し、直ちに書き直す。
+  function resumeDraft() {
+    draftStopped = false;
+    if (alive) flushDraft();
+  }
+  // 写真を付けた・外したとき。写真の下書きもすぐ書く。
+  function photosChanged() {
+    photosDirty = true;
+    flushDraft();
+  }
+
   function releaseUrl(item) {
     if (item.url) {
       URL.revokeObjectURL(item.url);
@@ -540,16 +767,25 @@ async function renderMemoForm(token, invId, memoId) {
     item.img = h('img', { class: 'thumb', src: item.url, alt: '' });
     item.removeButton = h('button', {
       type: 'button',
+      class: 'danger',
       onclick: () => {
-        // 外すだけ(確認なし)。メモを保存しなければ元に戻る。
+        // 押し間違いを防ぐため、確認してから外す。メモを保存しなければ元に戻る。
+        const n = photoItems.indexOf(item) + 1;
+        if (!confirm(`写真${n}を外しますか?`)) return;
         releaseUrl(item);
         photoItems.splice(photoItems.indexOf(item), 1);
         item.el.remove();
         relabelThumbs();
+        photosChanged();
       },
     });
     item.el = h('div', { class: 'thumb-item' }, item.img, item.removeButton);
     thumbList.append(item.el);
+  }
+
+  // 写真の取り込み中に押せなくするボタン(上の帯の保存ボタンも含む)
+  function busyButtons() {
+    return [cameraButton, libraryButton, saveButton, topSaveButton, deleteButton];
   }
 
   // 選ばれた写真を1枚ずつ順番に縮小する(同時に何枚も処理しない)。
@@ -557,7 +793,7 @@ async function renderMemoForm(token, invId, memoId) {
     if (!files.length || processing) return;
     processing = true;
     photoError.textContent = '';
-    [cameraButton, libraryButton, saveButton, deleteButton].forEach((b) => { if (b) b.disabled = true; });
+    busyButtons().forEach((b) => { if (b) b.disabled = true; });
     let failed = 0;
     try {
       for (let i = 0; i < files.length; i++) {
@@ -565,10 +801,11 @@ async function renderMemoForm(token, invId, memoId) {
         try {
           const blob = await shrinkToJpeg(files[i]);
           if (!alive) return;
-          const item = { blob, url: null };
+          const item = { blob, blobKey: draftBlobKey(invId, memoId, blobCounter++), url: null };
           photoItems.push(item);
           addThumb(item);
           relabelThumbs();
+          photosChanged(); // 1枚ごとに下書きへ(続けて足した分は重なれば1回にまとめて書かれる)
         } catch (err) {
           failed++;
         }
@@ -577,7 +814,7 @@ async function renderMemoForm(token, invId, memoId) {
       processing = false;
       if (alive) {
         photoStatus.textContent = '';
-        [cameraButton, libraryButton, saveButton, deleteButton].forEach((b) => { if (b) b.disabled = false; });
+        busyButtons().forEach((b) => { if (b) b.disabled = false; });
         if (failed) photoError.textContent = `${failed}枚の写真を読み込めませんでした`;
       }
     }
@@ -599,13 +836,20 @@ async function renderMemoForm(token, invId, memoId) {
         text: 'このメモを削除',
         onclick: async () => {
           if (!confirm('このメモを削除します。写真がある場合も一緒に消え、元に戻せません。\nよろしいですか?')) return;
-          await withBusy([saveButton, deleteButton, cameraButton, libraryButton], async () => {
+          await withBusy([saveButton, topSaveButton, deleteButton, cameraButton, libraryButton, backButton], async () => {
+            await stopDraft(false); // 削除のあとに下書きが書き戻されないようにする
             try {
               await deleteMemo(memo.id);
+              try {
+                await deleteDraft(invId, memoId);
+              } catch (err) {
+                // 消せなくても、メモが無いので次の一覧読み出しで片付く
+              }
               goReplace(`#/inv/${invId}`);
               return true;
             } catch (err) {
               errorBox.textContent = errorMessage(err);
+              resumeDraft();
             }
           });
         },
@@ -614,10 +858,13 @@ async function renderMemoForm(token, invId, memoId) {
   const form = h(
     'form',
     {
+      id: 'memo-form',
       onsubmit: async (e) => {
         e.preventDefault();
         const checked = form.querySelector('input[name="kind"]:checked');
-        await withBusy([saveButton, deleteButton, cameraButton, libraryButton], async () => {
+        await withBusy([saveButton, topSaveButton, deleteButton, cameraButton, libraryButton, backButton], async () => {
+          // 保存の間は下書きを書かない(保存のあとに下書きが復活しないように)。待ち中の入力は先に書き切る
+          await stopDraft(true);
           try {
             await saveMemo({
               id: isNew ? null : memo.id,
@@ -627,11 +874,13 @@ async function renderMemoForm(token, invId, memoId) {
               body: bodyInput.value,
               observedAt: observedInput.value,
               photos: photoItems.map((p) => (p.id ? { id: p.id } : { blob: p.blob })),
+              draftKeys: [draftKey(invId, memoId), draftPhotosKey(invId, memoId)], // メモの保存と同じ取引で下書きを消す
             });
             goReplace(`#/inv/${invId}`);
             return true;
           } catch (err) {
             errorBox.textContent = errorMessage(err);
+            resumeDraft(); // 保存できなかったので、書きかけは下書きに残す
           }
         });
       },
@@ -648,18 +897,55 @@ async function renderMemoForm(token, invId, memoId) {
     errorBox,
     saveButton
   );
+  // 入力欄が変わるたびに、下書きを(少しためてから)書く
+  form.addEventListener('input', scheduleDraft);
+  form.addEventListener('change', scheduleDraft);
+
+  // 「← 戻る」: 保存していない変更があれば確認する。戻るなら下書きも捨てる。
+  const backButton = h('button', {
+    type: 'button',
+    class: 'back',
+    text: `← ${inv.name}`,
+    onclick: async () => {
+      if (isDirty() && !confirm('保存していない変更があります。保存せずに戻りますか?\n(書きかけの内容は捨てられます)')) return;
+      await withBusy([backButton], async () => {
+        await stopDraft(false);
+        try {
+          await deleteDraft(invId, memoId);
+        } catch (err) {
+          // 消せなくても戻る(もう無いメモの下書きは自動で片付く。残っても「続きを書く」「捨てる」が使える)
+        }
+        go(`#/inv/${invId}`);
+        return true;
+      });
+    },
+  });
+  // 上の帯: 下へスクロールしても画面の上に残る
+  const topBar = h('div', { class: 'topbar' }, backButton, topSaveButton);
 
   show(
-    h('button', { type: 'button', class: 'back', text: `← ${inv.name}`, onclick: () => go(`#/inv/${invId}`) }),
+    topBar,
     h('h1', { text: isNew ? 'メモを追加' : 'メモを編集' }),
+    draft ? h('div', { class: 'restored', role: 'status', text: '前回保存していなかった内容を戻しました' }) : null,
+    draftWarning,
     form,
     deleteButton
   );
   // 画面に出したあとで、写真の表示と後片付けを登録する(show が前の画面の後片付けを先に行うため)
   photoItems.forEach(addThumb);
   relabelThumbs();
+  // 別のアプリに切り替えた・画面を閉じかけたときは、待たずにすぐ下書きを書く
+  const onVisibility = () => {
+    if (document.visibilityState === 'hidden') flushDraft();
+  };
+  document.addEventListener('visibilitychange', onVisibility);
+  const flushNow = () => flushDraft();
+  activeDraftFlush = flushNow;
   onLeavePage(() => {
     alive = false;
+    document.removeEventListener('visibilitychange', onVisibility);
+    if (activeDraftFlush === flushNow) activeDraftFlush = null;
+    flushDraft(); // 画面を離れるときも、待たずにすぐ書く(保存・削除・破棄のあとは書かない)
     photoItems.forEach(releaseUrl);
   });
 }
@@ -670,6 +956,12 @@ let renderToken = 0; // 古い描画が新しい描画を上書きしないた�
 
 async function route() {
   const token = ++renderToken;
+  // 書きかけのメモ画面から移るときは、下書きを先に書き終えてから次の画面を作る
+  // (次の画面の「書きかけのメモがあります」に、いま書いた分が出るようにするため)
+  if (activeDraftFlush) {
+    try { await activeDraftFlush(); } catch (err) { /* 下書きが書けなくても画面移動は続ける */ }
+    if (token !== renderToken) return;
+  }
   const parts = location.hash.replace(/^#\/?/, '').split('/').filter(Boolean);
   try {
     if (parts[0] === 'inv' && parts[1] && parts[2] === 'memo' && parts[3]) {

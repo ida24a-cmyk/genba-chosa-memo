@@ -11,7 +11,7 @@
 // 部品(../css、../js)は調査メモと共通だが、保存名は別。古い保存分の削除は自分の版の分だけを対象にする。
 
 const CACHE_PREFIX = 'genba-shashin-memo-';
-const CACHE_NAME = CACHE_PREFIX + 'v1';
+const CACHE_NAME = CACHE_PREFIX + 'v2';
 
 const APP_FILES = [
   './',
@@ -26,6 +26,7 @@ const APP_FILES = [
   '../js/export.js',
   '../js/edition.js',
   '../js/select.js',
+  '../js/draft.js',
   './icons/icon-180.png',
   './icons/icon-192.png',
   './icons/icon-512.png',

@@ -4,6 +4,17 @@
 import { formatLocalTimestamp, normalizeObserved } from './time.js';
 import { currentEdition } from './edition.js';
 import { normalizeIds } from './select.js';
+import {
+  DRAFT_PREFIX,
+  DRAFT_PHOTOS_PREFIX,
+  DRAFT_BLOB_PREFIX,
+  KEY_END,
+  draftKey,
+  draftPhotosKey,
+  draftBlobRange,
+  parseDraftKey,
+  parseDraftBlobKey,
+} from './draft.js';
 
 // 調査メモの DB名(これまでのデータの場所。絶対に変えない)。版ごとの DB名は edition.js にある。
 export const DB_NAME = 'genba-chosa-memo';
@@ -247,10 +258,14 @@ export async function getMemo(id) {
 // input: { id(編集のときだけ), investigationId, stage, kind, body, observedAt, photos }
 //   photos(省略可): 保存後の写真の並び。{ id } = 元からある写真、{ blob } = 新しく足す写真。
 //   省略すると写真は変えない。外された写真は photos から削除し、メモと同じ取引で保存する。
+//   draftKeys(省略可): 保存と同じ取引で消す下書きのキー(文字と写真の並び。写真の中身も一緒に消す)。下書きのキー以外は受け付けない。
 // 段階・種別・観測時刻が正しくなければエラーにする(保存しない)。
 // 保存のたびに、調査の lastStage をこのメモの段階に更新する。
 export async function saveMemo(input) {
   const body = String(input.body ?? '');
+  // 下書き以外のキー(採番カウンターなど)を巻き込んで消さないよう、先に確かめる
+  const draftKeys = Array.isArray(input.draftKeys) ? input.draftKeys : [];
+  if (!draftKeys.every((k) => parseDraftKey(k))) throw new Error('下書きのキーが不正です');
 
   return inTx(['meta', 'investigations', 'memos', 'photos'], async (tx) => {
     const memoStore = tx.objectStore('memos');
@@ -306,6 +321,15 @@ export async function saveMemo(input) {
       memo.photoIds = newIds;
     }
     memoStore.put(memo);
+    // 下書きは、メモの保存と同じ取引で消す(保存が失敗すれば下書きも残る)
+    // 文字・写真の並びのほか、そのメモの下書きの写真の中身もすべて消す
+    for (const key of draftKeys) {
+      const parsed = parseDraftKey(key);
+      const metaStore = tx.objectStore('meta');
+      metaStore.delete(key);
+      const [start, end] = draftBlobRange(parsed.invId, parsed.memoId);
+      metaStore.delete(IDBKeyRange.bound(start, end));
+    }
     if (inv.kind === '調査') {
       // 保存データに種類が無い第1版のノートも、ここでは変えずに lastStage だけ更新する
       const raw = await req(invStore.get(inv.id));
@@ -345,4 +369,168 @@ export async function deleteMemos(ids) {
       tx.objectStore('memos').delete(id);
     }
   });
+}
+
+// ---- 下書き(第4版) ----
+// 書きかけのメモを meta ストアにしまう(DBのバージョンは上げない)。キーの形式は draft.js を参照。
+// 文字:       { key, invId, memoId, stage, kind, body, observedAt, savedAt }
+// 写真の並び: { key, photos: [{ id } | { blobKey }] }(写真を足した/外したときだけ書く)
+// 写真の中身: { key, blob }(新しい写真1枚ずつ。一度だけ書く)
+// 書く順番は 文字 → 写真の中身 → 写真の並び(「並びにあるのに中身が無い」状態を作らないため)。
+
+// そのメモの下書きの写真の中身をすべて消す(取引の中で呼ぶ)。
+function deleteDraftBlobsOf(store, invId, memoId) {
+  const [start, end] = draftBlobRange(invId, memoId);
+  store.delete(IDBKeyRange.bound(start, end));
+}
+
+// 文字の下書きを書く(同じメモの下書きは上書き)。
+export async function putDraftText(draft) {
+  return inTx(['meta'], async (tx) => {
+    tx.objectStore('meta').put({
+      key: draftKey(draft.invId, draft.memoId),
+      invId: draft.invId,
+      memoId: draft.memoId,
+      stage: draft.stage ?? '',
+      kind: draft.kind ?? '',
+      body: String(draft.body ?? ''),
+      observedAt: String(draft.observedAt ?? ''),
+      savedAt: formatLocalTimestamp(),
+    });
+  });
+}
+
+// 新しい写真1枚ぶんの中身を書く。key は draftBlobKey() で作ったもの。
+export async function putDraftBlob(key, blob) {
+  if (!parseDraftBlobKey(key)) throw new Error('下書きのキーが不正です');
+  return inTx(['meta'], async (tx) => {
+    tx.objectStore('meta').put({ key, blob });
+  });
+}
+
+// 使わなくなった写真の中身を消す。
+export async function deleteDraftBlobs(keys) {
+  const list = (keys || []).filter((k) => parseDraftBlobKey(k));
+  if (!list.length) return;
+  return inTx(['meta'], async (tx) => {
+    for (const k of list) tx.objectStore('meta').delete(k);
+  });
+}
+
+// 写真の並びの下書きを書く。photos は { id }(元からある写真)または { blobKey }(新しい写真)の並び。
+export async function putDraftPhotos(invId, memoId, photos) {
+  const list = (photos || []).map((p) => (p.id ? { id: p.id } : { blobKey: p.blobKey }));
+  return inTx(['meta'], async (tx) => {
+    tx.objectStore('meta').put({ key: draftPhotosKey(invId, memoId), photos: list });
+  });
+}
+
+// 下書きを読む(文字と写真を合わせて返す)。文字の下書きが無ければ null。
+// photos は、写真の並びの下書きが無ければ null(= 写真は元のまま)。
+// あれば { id } または { blob, blobKey } の並び。中身が見つからない写真は飛ばす。
+export async function getDraft(invId, memoId) {
+  const db = await openDb();
+  const store = db.transaction('meta').objectStore('meta');
+  const text = await req(store.get(draftKey(invId, memoId)));
+  if (!text) return null;
+  const record = await req(store.get(draftPhotosKey(invId, memoId)));
+  let photos = null;
+  if (record && Array.isArray(record.photos)) {
+    photos = [];
+    for (const p of record.photos) {
+      if (p && p.id) {
+        photos.push({ id: p.id });
+      } else if (p && p.blobKey && parseDraftBlobKey(p.blobKey)) {
+        const stored = await req(store.get(p.blobKey));
+        if (stored && stored.blob) photos.push({ blob: stored.blob, blobKey: p.blobKey });
+      }
+    }
+  }
+  return {
+    invId: text.invId,
+    memoId: text.memoId,
+    stage: text.stage ?? '',
+    kind: text.kind ?? '',
+    body: text.body ?? '',
+    observedAt: text.observedAt ?? '',
+    savedAt: text.savedAt ?? '',
+    photos,
+  };
+}
+
+// そのメモの下書き(文字・写真の並び・写真の中身)をすべて消す。無ければ何もしない。
+export async function deleteDraft(invId, memoId) {
+  return inTx(['meta'], async (tx) => {
+    const store = tx.objectStore('meta');
+    store.delete(draftKey(invId, memoId));
+    store.delete(draftPhotosKey(invId, memoId));
+    deleteDraftBlobsOf(store, invId, memoId);
+  });
+}
+
+// 下書きの一覧(新しい順)。invId を渡すと、そのノートの下書きだけ。
+// もう無いノート・メモの下書きは、ここで消して一覧に出さない。
+// 戻り値: [{ invId, memoId, invName, memoObservedAt(新しいメモは null), savedAt }]
+export async function listDrafts(invId = null) {
+  const db = await openDb();
+  const tx = db.transaction(['meta', 'investigations', 'memos']);
+  const meta = tx.objectStore('meta');
+  const textRange = IDBKeyRange.bound(DRAFT_PREFIX, DRAFT_PREFIX + KEY_END);
+  const photoRange = IDBKeyRange.bound(DRAFT_PHOTOS_PREFIX, DRAFT_PHOTOS_PREFIX + KEY_END);
+  const blobRange = IDBKeyRange.bound(DRAFT_BLOB_PREFIX, DRAFT_BLOB_PREFIX + KEY_END);
+  const texts = await req(meta.getAll(textRange)); // 写真のキー('draftphotos:' など)はこの範囲に入らない
+  // 写真の並び・中身は大きいので、中身は読まずキーだけ取る
+  const photoKeys = await req(meta.getAllKeys(photoRange));
+  const blobKeys = await req(meta.getAllKeys(blobRange));
+
+  const result = [];
+  const staleMemos = new Map(); // 片付けるメモ('invId:memoId' → { invId, memoId })
+  const textKeys = new Set();
+  for (const d of texts) {
+    textKeys.add(d.key);
+    const parsed = parseDraftKey(d.key);
+    if (!parsed) continue;
+    if (invId && parsed.invId !== invId) continue;
+    const inv = await req(tx.objectStore('investigations').get(parsed.invId));
+    let memo = null;
+    if (inv && parsed.memoId !== 'new') {
+      memo = await req(tx.objectStore('memos').get(parsed.memoId));
+      if (memo && memo.investigationId !== parsed.invId) memo = null;
+    }
+    if (!inv || (parsed.memoId !== 'new' && !memo)) {
+      staleMemos.set(`${parsed.invId}:${parsed.memoId}`, parsed);
+      continue;
+    }
+    result.push({
+      invId: parsed.invId,
+      memoId: parsed.memoId,
+      invName: inv.name,
+      memoObservedAt: memo ? memo.observedAt : null,
+      savedAt: d.savedAt || '',
+    });
+  }
+  // 文字の下書きが無いのに残っている、写真の並び・写真の中身も片付ける
+  for (const k of [...photoKeys, ...blobKeys]) {
+    const parsed = parseDraftKey(k) || parseDraftBlobKey(k);
+    if (!parsed) continue;
+    if (invId && parsed.invId !== invId) continue;
+    if (!textKeys.has(draftKey(parsed.invId, parsed.memoId))) staleMemos.set(`${parsed.invId}:${parsed.memoId}`, parsed);
+  }
+
+  if (staleMemos.size) {
+    try {
+      await inTx(['meta'], async (wtx) => {
+        const store = wtx.objectStore('meta');
+        for (const { invId: i, memoId: m } of staleMemos.values()) {
+          store.delete(draftKey(i, m));
+          store.delete(draftPhotosKey(i, m));
+          deleteDraftBlobsOf(store, i, m);
+        }
+      });
+    } catch (err) {
+      // 片付けに失敗しても、一覧の表示は続ける
+    }
+  }
+  result.sort((a, b) => (a.savedAt < b.savedAt ? 1 : a.savedAt > b.savedAt ? -1 : 0));
+  return result;
 }
